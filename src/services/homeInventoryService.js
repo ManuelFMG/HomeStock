@@ -692,6 +692,11 @@ async function updateMultiProductCommonFields(
             price: numericPrice,
             storage: normalizedStorage,
             daysAfterOpening: normalizedDaysAfterOpening,
+
+            // La edición común nunca puede degradar un producto multi
+            // al flujo legacy ni modificar su stock físico.
+            usesLots: true,
+            lotStrategy: "multi",
         });
     });
 }

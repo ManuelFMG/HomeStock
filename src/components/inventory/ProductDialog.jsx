@@ -17,6 +17,7 @@ import useHome from "../../hooks/useHome";
 import {
     addHomeProduct,
     updateHomeProduct,
+    updateMultiProductCommonFields,
 } from "../../services/homeInventoryService";
 
 import {
@@ -63,6 +64,10 @@ function ProductDialog({
 
 
     const { home } = useHome();
+
+    const isMultiLot =
+        product?.usesLots === true
+        && product?.lotStrategy === "multi";
 
 
     useEffect(() => {
@@ -270,6 +275,7 @@ function ProductDialog({
 
 
     async function handleSave() {
+        try {
 
         if (!productName.trim()) {
             return;
@@ -385,52 +391,60 @@ function ProductDialog({
 
         if (product) {
 
-            const previousQuantity =
-                Number.isInteger(
-                    Number(product.quantity)
-                )
-                    && Number(product.quantity) >= 0
-                    ? Number(product.quantity)
-                    : 0;
-
-
-            await updateHomeProduct(
-                home.id,
-                product.id,
-                productData
-            );
-
-
-            const quantityChange =
-                numericQuantity
-                - previousQuantity;
-
-
-            if (quantityChange !== 0) {
-
-                await addMovement(
+            if (isMultiLot) {
+                await updateMultiProductCommonFields(
                     home.id,
+                    product.id,
                     {
-                        productId:
-                            product.id,
-
-                        productName:
-                            productData.name,
-
-                        type:
-                            quantityChange > 0
-                                ? "increase"
-                                : "decrease",
-
-                        quantityChange,
-
-                        previousQuantity,
-
-                        newQuantity:
-                            numericQuantity,
+                        name: productData.name,
+                        price: productData.price,
+                        storage: productData.storage,
+                        daysAfterOpening: productData.daysAfterOpening,
                     }
                 );
+            } else {
+                const previousQuantity =
+                    Number.isInteger(
+                        Number(product.quantity)
+                    )
+                        && Number(product.quantity) >= 0
+                        ? Number(product.quantity)
+                        : 0;
 
+                await updateHomeProduct(
+                    home.id,
+                    product.id,
+                    productData
+                );
+
+                const quantityChange =
+                    numericQuantity
+                    - previousQuantity;
+
+                if (quantityChange !== 0) {
+                    await addMovement(
+                        home.id,
+                        {
+                            productId:
+                                product.id,
+
+                            productName:
+                                productData.name,
+
+                            type:
+                                quantityChange > 0
+                                    ? "increase"
+                                    : "decrease",
+
+                            quantityChange,
+
+                            previousQuantity,
+
+                            newQuantity:
+                                numericQuantity,
+                        }
+                    );
+                }
             }
 
         } else {
@@ -518,6 +532,9 @@ function ProductDialog({
 
 
         onClose();
+        } catch (error) {
+            console.error("Error al guardar el producto:", error);
+        }
 
     }
 
@@ -588,6 +605,8 @@ function ProductDialog({
                     onDaysAfterOpeningChange={
                         handleDaysAfterOpeningChange
                     }
+
+                    multiLotMode={isMultiLot}
                 />
 
             </DialogContent>

@@ -2910,9 +2910,7 @@ function ProductCard({
 
   const showLotDetails =
 
-    canRegisterOpening
-
-    && !isOutOfStock
+    !isOutOfStock
 
     && visibleLots.length > 0;
 
