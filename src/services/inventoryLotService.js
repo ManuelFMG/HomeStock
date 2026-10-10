@@ -4195,10 +4195,160 @@ function compareInventoryLotsForConsumption(
 }
 
 
+/*
+ * AÑADIR UNA UNIDAD A UNA FAMILIA MULTI
+ *
+ * El control + individual no crea un nuevo lote principal.
+ * Añade la unidad al segmento cerrado de la familia; si toda
+ * la familia está abierta, crea un nuevo segmento cerrado
+ * enlazado mediante splitFromLotId.
+ */
+async function addUnitToMultiLotFamily(
+    homeId,
+    productId,
+    allLotIds = [],
+    familyLotIds = []
+) {
+    if (!homeId || !productId) {
+        throw new Error("No se puede añadir stock sin homeId y productId.");
+    }
+
+    const allIds = validateMultiStockLotIds(allLotIds);
+    const familyIds = validateMultiStockLotIds(familyLotIds);
+
+    if (allIds.length < 1 || familyIds.length < 1) {
+        throw new Error("No se han recibido los lotes físicos necesarios para esta operación.");
+    }
+
+    const allIdSet = new Set(allIds);
+    if (familyIds.some(id => !allIdSet.has(id))) {
+        throw new Error("La familia seleccionada no pertenece a los lotes actuales del producto.");
+    }
+
+    const productRef = doc(db, "homes", homeId, "inventory", productId);
+    const movementRef = doc(collection(db, "homes", homeId, "movementHistory"));
+    const newSegmentRef = doc(getInventoryLotsCollection(homeId));
+
+    return await runTransaction(db, async transaction => {
+        const productSnapshot = await transaction.get(productRef);
+        if (!productSnapshot.exists()) {
+            throw new Error("El producto al que se intenta añadir stock ya no existe.");
+        }
+
+        const product = {
+            id: productSnapshot.id,
+            ...productSnapshot.data(),
+        };
+
+        validateMultiStockProduct(product);
+        if (product.isOutOfStock === true) {
+            throw new Error("No se puede añadir stock a un producto marcado como agotado.");
+        }
+
+        const previousQuantity = validateMultiStockQuantity(product.quantity);
+        const physicalLots = [];
+
+        for (const lotId of allIds) {
+            const lotRef = doc(db, "homes", homeId, "inventoryLots", lotId);
+            const lotSnapshot = await transaction.get(lotRef);
+            if (!lotSnapshot.exists()) {
+                throw new Error("Los lotes han cambiado. Actualiza el inventario antes de añadir stock.");
+            }
+
+            const lot = {
+                id: lotSnapshot.id,
+                ...lotSnapshot.data(),
+            };
+
+            if (lot.productId !== productId) {
+                throw new Error("Uno de los lotes no pertenece al producto indicado.");
+            }
+
+            physicalLots.push({
+                ...lot,
+                ref: lotRef,
+                quantity: validateMultiStockQuantity(lot.quantity),
+            });
+        }
+
+        const physicalQuantity = physicalLots.reduce((total, lot) => total + lot.quantity, 0);
+        if (physicalQuantity !== previousQuantity) {
+            throw new Error("El stock del producto ha cambiado. Actualiza el inventario antes de añadir una unidad.");
+        }
+
+        const familyIdSet = new Set(familyIds);
+        const familyLots = physicalLots.filter(lot => familyIdSet.has(lot.id));
+        if (familyLots.length !== familyIds.length) {
+            throw new Error("La familia de lotes ha cambiado. Actualiza el inventario antes de añadir una unidad.");
+        }
+
+        const canonicalRootIds = new Set(
+            familyLots.map(lot => String(lot.splitFromLotId || lot.id))
+        );
+        if (canonicalRootIds.size !== 1) {
+            throw new Error("Los segmentos seleccionados no pertenecen a una única familia de lote.");
+        }
+
+        const canonicalRootId = [...canonicalRootIds][0];
+        const closedSegment = familyLots.find(
+            lot => !normalizeInventoryDate(lot.openingDate) && lot.id === canonicalRootId
+        ) || familyLots.find(
+            lot => !normalizeInventoryDate(lot.openingDate)
+        );
+
+        const newQuantity = previousQuantity + 1;
+        let targetLotId;
+
+        if (closedSegment) {
+            transaction.update(closedSegment.ref, {
+                quantity: closedSegment.quantity + 1,
+            });
+            targetLotId = closedSegment.id;
+        } else {
+            const referenceLot = familyLots.find(lot => lot.id === canonicalRootId) || familyLots[0];
+            transaction.set(newSegmentRef, {
+                productId,
+                quantity: 1,
+                expirationDate: normalizeInventoryDate(referenceLot.expirationDate),
+                openingDate: "",
+                createdAt: serverTimestamp(),
+                origin: String(referenceLot.origin || "manual"),
+                splitFromLotId: canonicalRootId,
+            });
+            targetLotId = newSegmentRef.id;
+        }
+
+        transaction.update(productRef, {
+            quantity: newQuantity,
+            usesLots: true,
+            lotStrategy: "multi",
+        });
+
+        transaction.set(movementRef, {
+            productId,
+            productName: product.name || "",
+            type: "increase",
+            quantityChange: 1,
+            previousQuantity,
+            newQuantity,
+            createdAt: serverTimestamp(),
+            lotId: targetLotId,
+        });
+
+        return {
+            productId,
+            targetLotId,
+            previousQuantity,
+            newQuantity,
+            createdClosedSegment: !closedSegment,
+        };
+    });
+}
 async function consumeProductStockFromLots(
     homeId,
     productId,
-    lotIds = []
+    lotIds = [],
+    preferredLotIds = []
 ) {
 
     if (
@@ -4255,6 +4405,26 @@ async function consumeProductStockFromLots(
                     .filter(Boolean)
             )
         );
+
+    const preferredLotIdSet =
+        new Set(
+            (Array.isArray(preferredLotIds) ? preferredLotIds : [])
+                .map(
+                    (lotId) =>
+                        String(
+                            lotId || ""
+                        ).trim()
+                )
+                .filter(Boolean)
+        );
+
+    if (
+        [...preferredLotIdSet].some(
+            lotId => !uniqueLotIds.includes(lotId)
+        )
+    ) {
+        throw new Error("La familia seleccionada no pertenece a los lotes actuales del producto.");
+    }
 
 
     return await runTransaction(
@@ -4549,14 +4719,23 @@ async function consumeProductStockFromLots(
                     );
 
 
+            const preferredConsumableLots =
+                preferredLotIdSet.size > 0
+                    ? consumableLots.filter(
+                        lot => preferredLotIdSet.has(lot.id)
+                    )
+                    : consumableLots;
+
             const selectedLot =
-                consumableLots[0];
+                preferredConsumableLots[0];
 
 
             if (!selectedLot) {
 
                 throw new Error(
-                    "No existe ningún lote con unidades disponibles para consumir."
+                    preferredLotIdSet.size > 0
+                        ? "El lote seleccionado no tiene unidades disponibles para consumir."
+                        : "No existe ningún lote con unidades disponibles para consumir."
                 );
 
             }
@@ -5163,6 +5342,7 @@ export {
     calculateInventoryLotsQuantity,
     getProductLotsSummary,
     addProductStockAsNewLot,
+    addUnitToMultiLotFamily,
     splitInventoryLotForOpening,
     undoInventoryLotOpening,
     consumeProductStockFromLots,

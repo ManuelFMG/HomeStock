@@ -104,6 +104,10 @@ import {
 
   consumeProductStockFromLots,
 
+  addProductStockAsNewLot,
+
+  addUnitToMultiLotFamily,
+
   markMultiProductOutOfStockWithLots,
 
   reactivateMultiProductWithLots,
@@ -1122,6 +1126,127 @@ function ProductCard({
 
 
 
+  async function handleAddLotAwareUnit() {
+    if (!home || savingQuantity || isOutOfStock || !isMultiLot) {
+      return;
+    }
+
+    setSavingQuantity(true);
+
+    try {
+      const result = await addProductStockAsNewLot(
+        home.id,
+        product.id,
+        1,
+        {
+          expirationDate: "",
+          openingDate: "",
+          origin: "manual",
+        }
+      );
+
+      await addMovement(
+        home.id,
+        {
+          productId: product.id,
+          productName: product.name,
+          type: "increase",
+          quantityChange: 1,
+          previousQuantity: result.previousQuantity,
+          newQuantity: result.newQuantity,
+        }
+      );
+
+      setQuantity(result.newQuantity);
+
+      if (onQuantityChange) {
+        await onQuantityChange(product.id, result.newQuantity);
+      }
+
+      if (onInventoryRefresh) {
+        await onInventoryRefresh();
+      }
+    } catch (error) {
+      console.error("Error al añadir una unidad por lotes:", error);
+    } finally {
+      setSavingQuantity(false);
+    }
+  }
+  async function handleAddLotFamilyUnit(lotGroup) {
+    if (!home || savingQuantity || isOutOfStock || !isMultiLot) {
+      return;
+    }
+
+    setSavingQuantity(true);
+
+    try {
+      const result = await addUnitToMultiLotFamily(
+        home.id,
+        product.id,
+        visibleLots.map(lot => lot.id),
+        lotGroup.segments.map(segment => segment.id)
+      );
+
+      setQuantity(result.newQuantity);
+
+      if (onQuantityChange) {
+        await onQuantityChange(product.id, result.newQuantity);
+      }
+
+      if (onInventoryRefresh) {
+        await onInventoryRefresh();
+      }
+    } catch (error) {
+      console.error("Error al añadir una unidad al lote:", error);
+    } finally {
+      setSavingQuantity(false);
+    }
+  }
+
+  async function handleConsumeLotFamilyUnit(lotGroup) {
+    if (!home || savingQuantity || isOutOfStock || quantity <= 0 || !isMultiLot) {
+      return;
+    }
+
+    setSavingQuantity(true);
+
+    try {
+      const result = await consumeProductStockFromLots(
+        home.id,
+        product.id,
+        visibleLots.map(lot => lot.id),
+        lotGroup.segments.map(segment => segment.id)
+      );
+
+      setQuantity(result.newQuantity);
+
+      if (result.becameOutOfStock) {
+        setIsOutOfStock(true);
+        setQuantityBeforeOutOfStock(0);
+        setShoppingItemId("");
+        if (onQuantityChange) {
+          await onQuantityChange(product.id, 0, {
+            isOutOfStock: true,
+            quantityBeforeOutOfStock: 0,
+            outOfStockShoppingItemId: "",
+          });
+        }
+      }
+
+      if (onInventoryRefresh) {
+        await onInventoryRefresh();
+      }
+
+      if (result.becameOutOfStock) {
+        document.activeElement?.blur();
+        setStatusDialogMode("shopping");
+      }
+    } catch (error) {
+      console.error("Error al consumir una unidad del lote:", error);
+    } finally {
+      setSavingQuantity(false);
+    }
+  }
   async function handleConsumeLotAwareUnit() {
     if (!home || savingQuantity || isOutOfStock || quantity <= 0 || !isMultiLot) {
       return;
@@ -3214,11 +3339,9 @@ function ProductCard({
 
               onClick={() =>
 
-                handleQuantityChange(
-
-                  quantity + 1
-
-                )
+                isMultiLot
+                  ? handleAddLotAwareUnit()
+                  : handleQuantityChange(quantity + 1)
 
               }
 
@@ -3229,8 +3352,6 @@ function ProductCard({
                 savingQuantity
 
                 || isOutOfStock
-
-                || isMultiLot
 
               }
 
@@ -3582,23 +3703,121 @@ function ProductCard({
 
 
 
-                        <Chip
+                        <Box
 
-                          size="small"
+                          sx={{
 
-                          variant="outlined"
+                            display: "flex",
 
-                          label={
+                            alignItems: "center",
 
-                            getLotOriginLabel(
+                            gap: 0.25,
 
-                              lotGroup.origin
+                          }}
 
-                            )
+                        >
 
-                          }
+                          <IconButton
 
-                        />
+                            size="small"
+
+                            onClick={() =>
+
+                              handleConsumeLotFamilyUnit(
+
+                                lotGroup
+
+                              )
+
+                            }
+
+                            disabled={
+
+                              savingQuantity
+
+                              || isOutOfStock
+
+                              || groupQuantity <= 0
+
+                              || savingLotOpeningId !== ""
+
+                              || savingLotUndoOpeningId !== ""
+
+                            }
+
+                            aria-label={`Reducir lote ${groupIndex + 1}`}
+
+                          >
+
+                            <RemoveIcon
+
+                              fontSize="small"
+
+                            />
+
+                          </IconButton>
+
+
+
+                          <IconButton
+
+                            size="small"
+
+                            onClick={() =>
+
+                              handleAddLotFamilyUnit(
+
+                                lotGroup
+
+                              )
+
+                            }
+
+                            disabled={
+
+                              savingQuantity
+
+                              || isOutOfStock
+
+                              || savingLotOpeningId !== ""
+
+                              || savingLotUndoOpeningId !== ""
+
+                            }
+
+                            aria-label={`Aumentar lote ${groupIndex + 1}`}
+
+                          >
+
+                            <AddIcon
+
+                              fontSize="small"
+
+                            />
+
+                          </IconButton>
+
+
+
+                          <Chip
+
+                            size="small"
+
+                            variant="outlined"
+
+                            label={
+
+                              getLotOriginLabel(
+
+                                lotGroup.origin
+
+                              )
+
+                            }
+
+                          />
+
+                        </Box>
 
 
 
