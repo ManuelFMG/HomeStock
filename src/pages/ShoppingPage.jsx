@@ -16,6 +16,7 @@ import BackToHomeButton from "../components/layout/BackToHomeButton";
 import ShoppingForm from "../components/shopping/ShoppingForm";
 import ShoppingList from "../components/shopping/ShoppingList";
 import ShoppingDuplicateDialog from "../components/shopping/ShoppingDuplicateDialog";
+import ShoppingInventoryWarningDialog from "../components/shopping/ShoppingInventoryWarningDialog";
 
 import ConfirmDialog from "../components/common/ConfirmDialog";
 
@@ -29,8 +30,12 @@ import {
   deleteShoppingItem,
   deleteShoppingItems,
   findDuplicateShoppingItem,
+  normalizeProductName,
 } from "../services/shoppingService";
 
+import {
+  getHomeProducts,
+} from "../services/homeInventoryService";
 import {
   addShoppingItemToInventory,
   addShoppingSectionToInventory,
@@ -131,6 +136,11 @@ function ShoppingPage() {
     setExistingDuplicateName,
   ] = useState("");
 
+
+  const [
+    inventoryStockWarning,
+    setInventoryStockWarning,
+  ] = useState(null);
 
   const [error, setError] =
     useState("");
@@ -266,145 +276,113 @@ function ShoppingPage() {
   }
 
 
-  async function handleAddItem(event) {
+  function getActiveInventoryMatches(products, name) {
+    const normalizedName = normalizeProductName(name);
+    if (!normalizedName || !Array.isArray(products)) {
+      return [];
+    }
 
+    return products.filter((product) => (
+      normalizeProductName(product.name) === normalizedName
+      && Number(product.quantity) > 0
+      && product.isOutOfStock !== true
+    ));
+  }
+
+  async function createManualShoppingItem(item) {
+    await addShoppingItem(home.id, item);
+
+    setProductName("");
+    setQuantity(1);
+    setStorage("");
+    setStorageError(false);
+
+    await loadShoppingItems();
+  }
+
+  async function handleConfirmInventoryStockWarning() {
+    if (!home || !inventoryStockWarning || saving) {
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      setError("");
+      await createManualShoppingItem(inventoryStockWarning.item);
+      setInventoryStockWarning(null);
+    } catch (error) {
+      console.error("Error al añadir el producto a la lista de la compra:", error);
+      setError("No se ha podido añadir el producto.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleAddItem(event) {
     event.preventDefault();
 
-
-    if (!home) {
+    if (!home || saving) {
       return;
     }
-
 
     if (!productName.trim()) {
-
-      setError(
-        "Introduce el nombre del producto."
-      );
-
+      setError("Introduce el nombre del producto.");
       return;
-
     }
 
-
-    const numericQuantity =
-      Number(quantity);
-
-
-    if (
-      !Number.isInteger(
-        numericQuantity
-      )
-      || numericQuantity < 1
-    ) {
-
-      setError(
-        "La cantidad debe ser un número entero mayor que cero."
-      );
-
+    const numericQuantity = Number(quantity);
+    if (!Number.isInteger(numericQuantity) || numericQuantity < 1) {
+      setError("La cantidad debe ser un número entero mayor que cero.");
       return;
-
     }
-
 
     if (!storage) {
-
       setStorageError(true);
-
-      setError(
-        "Selecciona una ubicación para el producto."
-      );
-
+      setError("Selecciona una ubicación para el producto.");
       return;
-
     }
 
+    const trimmedProductName = productName.trim();
+    const duplicateItem = findDuplicateShoppingItem(items, trimmedProductName);
+    if (duplicateItem) {
+      setError("");
+      showDuplicateDialog(trimmedProductName, duplicateItem.name);
+      return;
+    }
 
-    const trimmedProductName =
-      productName.trim();
+    const item = {
+      name: trimmedProductName,
+      quantity: numericQuantity,
+      storage,
+      purchased: false,
+    };
 
+    try {
+      setSaving(true);
+      setError("");
+      setStorageError(false);
 
-    const duplicateItem =
-      findDuplicateShoppingItem(
-        items,
+      const inventoryProducts = await getHomeProducts(home.id);
+      const inventoryMatches = getActiveInventoryMatches(
+        inventoryProducts,
         trimmedProductName
       );
 
+      if (inventoryMatches.length > 0) {
+        document.activeElement?.blur();
+        setInventoryStockWarning({ item, matches: inventoryMatches });
+        return;
+      }
 
-    if (duplicateItem) {
-
-      setError("");
-
-
-      showDuplicateDialog(
-        trimmedProductName,
-        duplicateItem.name
-      );
-
-
-      return;
-
-    }
-
-
-    try {
-
-      setSaving(true);
-
-      setError("");
-
-      setStorageError(false);
-
-
-      await addShoppingItem(
-        home.id,
-        {
-          name:
-            trimmedProductName,
-
-          quantity:
-            numericQuantity,
-
-          storage,
-
-          purchased:
-            false,
-        }
-      );
-
-
-      setProductName("");
-
-      setQuantity(1);
-
-      setStorage("");
-
-      setStorageError(false);
-
-
-      await loadShoppingItems();
-
+      await createManualShoppingItem(item);
     } catch (error) {
-
-      console.error(
-        "Error al añadir el producto a la lista de la compra:",
-        error
-      );
-
-
-      setError(
-        "No se ha podido añadir el producto."
-      );
-
+      console.error("Error al añadir el producto a la lista de la compra:", error);
+      setError("No se ha podido comprobar el Inventario o añadir el producto.");
     } finally {
-
       setSaving(false);
-
     }
-
   }
-
-
   async function handleTogglePurchased(item) {
 
     if (!home) {
@@ -1205,6 +1183,15 @@ function ShoppingPage() {
         }
       />
 
+
+      <ShoppingInventoryWarningDialog
+        open={inventoryStockWarning !== null}
+        productName={inventoryStockWarning?.item.name || ""}
+        matches={inventoryStockWarning?.matches || []}
+        saving={saving}
+        onCancel={() => setInventoryStockWarning(null)}
+        onConfirm={handleConfirmInventoryStockWarning}
+      />
 
       <ShoppingDuplicateDialog
         open={
