@@ -4196,6 +4196,110 @@ function compareInventoryLotsForConsumption(
 
 
 /*
+ * ACTUALIZAR LA CADUCIDAD DE UNA FAMILIA MULTI
+ *
+ * Una familia contiene el lote principal y todos los segmentos creados
+ * por aperturas parciales. La fecha se actualiza de forma uniforme sin
+ * modificar cantidades, aperturas, producto raíz ni historial.
+ */
+async function updateMultiLotFamilyExpirationDate(
+    homeId,
+    productId,
+    allLotIds = [],
+    familyLotIds = [],
+    expirationDate = ""
+) {
+    if (!homeId || !productId) {
+        throw new Error("No se puede actualizar la caducidad sin homeId y productId.");
+    }
+
+    const allIds = validateMultiStockLotIds(allLotIds);
+    const familyIds = validateMultiStockLotIds(familyLotIds);
+    if (allIds.length < 1 || familyIds.length < 1) {
+        throw new Error("No se han recibido los segmentos físicos necesarios para esta operación.");
+    }
+
+    const allIdSet = new Set(allIds);
+    if (familyIds.some((id) => !allIdSet.has(id))) {
+        throw new Error("La familia seleccionada no pertenece a los lotes actuales del producto.");
+    }
+
+    const productRef = doc(db, "homes", homeId, "inventory", productId);
+    const normalizedExpirationDate = normalizeInventoryDate(expirationDate);
+
+    return await runTransaction(db, async (transaction) => {
+        const productSnapshot = await transaction.get(productRef);
+        if (!productSnapshot.exists()) {
+            throw new Error("El producto ya no existe.");
+        }
+
+        const product = {
+            id: productSnapshot.id,
+            ...productSnapshot.data(),
+        };
+        validateMultiStockProduct(product);
+
+        const previousQuantity = validateMultiStockQuantity(product.quantity);
+        const physicalLots = [];
+        for (const lotId of allIds) {
+            const lotRef = doc(db, "homes", homeId, "inventoryLots", lotId);
+            const lotSnapshot = await transaction.get(lotRef);
+            if (!lotSnapshot.exists()) {
+                throw new Error("Los lotes han cambiado. Actualiza el inventario antes de editar su caducidad.");
+            }
+
+            const lot = {
+                id: lotSnapshot.id,
+                ...lotSnapshot.data(),
+            };
+            if (lot.productId !== productId) {
+                throw new Error("Uno de los lotes no pertenece al producto indicado.");
+            }
+
+            physicalLots.push({
+                ...lot,
+                ref: lotRef,
+                quantity: validateMultiStockQuantity(lot.quantity),
+            });
+        }
+
+        const physicalQuantity = physicalLots.reduce(
+            (total, lot) => total + lot.quantity,
+            0
+        );
+        if (physicalQuantity !== previousQuantity) {
+            throw new Error("El stock del producto ha cambiado. Actualiza el inventario antes de editar su caducidad.");
+        }
+
+        const familyIdSet = new Set(familyIds);
+        const familyLots = physicalLots.filter((lot) => familyIdSet.has(lot.id));
+        if (familyLots.length !== familyIds.length) {
+            throw new Error("La familia de lotes ha cambiado. Actualiza el inventario antes de editar su caducidad.");
+        }
+
+        const canonicalRootIds = new Set(
+            familyLots.map((lot) => String(lot.splitFromLotId || lot.id))
+        );
+        if (canonicalRootIds.size !== 1) {
+            throw new Error("Los segmentos seleccionados no pertenecen a una única familia de lote.");
+        }
+
+        for (const lot of familyLots) {
+            transaction.update(lot.ref, {
+                expirationDate: normalizedExpirationDate,
+            });
+        }
+
+        return {
+            productId,
+            familyLotIds: familyLots.map((lot) => lot.id),
+            expirationDate: normalizedExpirationDate,
+            unchangedQuantity: previousQuantity,
+        };
+    });
+}
+
+/*
  * AÑADIR UNA UNIDAD A UNA FAMILIA MULTI
  *
  * El control + individual no crea un nuevo lote principal.
@@ -4937,6 +5041,145 @@ async function consumeProductStockFromLots(
 }
 
 
+/*
+ * AGOTAR STOCK DE LOTES MULTI
+ *
+ * Retira de forma definitiva todos los segmentos recibidos. Se utiliza
+ * tanto para una familia completa como para un único sublote; nunca crea
+ * un snapshot recuperable, porque las unidades se consideran consumidas.
+ */
+async function exhaustMultiLotStock(
+    homeId,
+    productId,
+    allLotIds = [],
+    targetLotIds = [],
+    referenceLotId = ""
+) {
+    if (!homeId || !productId) {
+        throw new Error("No se puede agotar stock sin homeId y productId.");
+    }
+
+    const allIds = validateMultiStockLotIds(allLotIds);
+    const targetIds = validateMultiStockLotIds(targetLotIds);
+    if (allIds.length < 1 || targetIds.length < 1) {
+        throw new Error("No se han recibido los lotes físicos necesarios para esta operación.");
+    }
+
+    const allIdSet = new Set(allIds);
+    if (targetIds.some((id) => !allIdSet.has(id))) {
+        throw new Error("Los lotes seleccionados no pertenecen al producto actual.");
+    }
+
+    const productRef = doc(db, "homes", homeId, "inventory", productId);
+    const movementRef = doc(collection(db, "homes", homeId, "movementHistory"));
+
+    return await runTransaction(db, async (transaction) => {
+        const productSnapshot = await transaction.get(productRef);
+        if (!productSnapshot.exists()) {
+            throw new Error("El producto ya no existe.");
+        }
+
+        const product = {
+            id: productSnapshot.id,
+            ...productSnapshot.data(),
+        };
+        validateMultiStockProduct(product);
+        if (product.isOutOfStock === true) {
+            throw new Error("No se puede agotar un producto marcado como agotado.");
+        }
+
+        const previousQuantity = validateMultiStockQuantity(product.quantity);
+        const physicalLots = [];
+        for (const lotId of allIds) {
+            const lotRef = doc(db, "homes", homeId, "inventoryLots", lotId);
+            const lotSnapshot = await transaction.get(lotRef);
+            if (!lotSnapshot.exists()) {
+                throw new Error("Los lotes han cambiado. Actualiza el inventario antes de agotarlos.");
+            }
+
+            const lot = {
+                id: lotSnapshot.id,
+                ...lotSnapshot.data(),
+            };
+            if (lot.productId !== productId) {
+                throw new Error("Uno de los lotes no pertenece al producto indicado.");
+            }
+
+            physicalLots.push({
+                ...lot,
+                ref: lotRef,
+                quantity: validateMultiStockQuantity(lot.quantity),
+            });
+        }
+
+        const physicalQuantity = physicalLots.reduce(
+            (total, lot) => total + lot.quantity,
+            0
+        );
+        if (physicalQuantity !== previousQuantity) {
+            throw new Error("El stock del producto ha cambiado. Actualiza el inventario antes de agotarlo.");
+        }
+
+        const targetIdSet = new Set(targetIds);
+        const targetLots = physicalLots.filter((lot) => targetIdSet.has(lot.id));
+        if (targetLots.length !== targetIds.length) {
+            throw new Error("Los lotes seleccionados han cambiado. Actualiza el inventario antes de agotarlos.");
+        }
+
+        const quantityRemoved = targetLots.reduce(
+            (total, lot) => total + lot.quantity,
+            0
+        );
+        if (quantityRemoved < 1) {
+            throw new Error("Los lotes seleccionados ya no tienen unidades disponibles.");
+        }
+
+        const newQuantity = previousQuantity - quantityRemoved;
+        if (newQuantity < 0) {
+            throw new Error("La cantidad de los lotes seleccionados no es coherente con el producto.");
+        }
+
+        for (const lot of targetLots) {
+            transaction.delete(lot.ref);
+        }
+
+        const productUpdate = {
+            quantity: newQuantity,
+        };
+        const becameOutOfStock = newQuantity === 0;
+        if (becameOutOfStock) {
+            productUpdate.isOutOfStock = true;
+            productUpdate.quantityBeforeOutOfStock = 0;
+            productUpdate.outOfStockShoppingItemId = "";
+            productUpdate.lotsBeforeOutOfStock = null;
+            productUpdate.outOfStockReason = "consumed";
+        }
+
+        transaction.update(productRef, productUpdate);
+        transaction.set(movementRef, {
+            productId,
+            productName: product.name || "",
+            type: "decrease",
+            quantityChange: -quantityRemoved,
+            previousQuantity,
+            newQuantity,
+            createdAt: serverTimestamp(),
+            lotId: referenceLotId || targetLots[0].id,
+            lotIds: targetLots.map((lot) => lot.id),
+        });
+
+        return {
+            productId,
+            removedLotIds: targetLots.map((lot) => lot.id),
+            quantityRemoved,
+            previousQuantity,
+            newQuantity,
+            becameOutOfStock,
+            changed: true,
+        };
+    });
+}
+
 async function updateInventoryLot(
     homeId,
     lotId,
@@ -5343,9 +5586,13 @@ export {
     getProductLotsSummary,
     addProductStockAsNewLot,
     addUnitToMultiLotFamily,
+    updateMultiLotFamilyExpirationDate,
+
     splitInventoryLotForOpening,
     undoInventoryLotOpening,
     consumeProductStockFromLots,
+    exhaustMultiLotStock,
+
     updateInventoryLot,
     deleteInventoryLot,
 };

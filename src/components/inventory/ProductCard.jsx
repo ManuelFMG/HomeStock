@@ -82,6 +82,10 @@ import ProductStatusDialog from "./ProductStatusDialog";
 
 import OpeningStatusDialog from "./OpeningStatusDialog";
 
+import LotExpirationDialog from "./LotExpirationDialog";
+
+import AddLotDialog from "./AddLotDialog";
+
 
 
 import {
@@ -94,6 +98,8 @@ import {
 
 import ShoppingDuplicateDialog from "../shopping/ShoppingDuplicateDialog";
 
+import ConfirmDialog from "../common/ConfirmDialog";
+
 
 
 import {
@@ -104,9 +110,13 @@ import {
 
   consumeProductStockFromLots,
 
+  exhaustMultiLotStock,
+
   addProductStockAsNewLot,
 
   addUnitToMultiLotFamily,
+
+  updateMultiLotFamilyExpirationDate,
 
   markMultiProductOutOfStockWithLots,
 
@@ -280,6 +290,34 @@ function ProductCard({
 
   const [
 
+    addLotDialogOpen,
+
+    setAddLotDialogOpen,
+
+  ] = useState(false);
+
+
+  const [
+
+    savingLotExpiration,
+
+    setSavingLotExpiration,
+
+  ] = useState(false);
+
+
+
+  const [
+
+    lotExpirationDialog,
+
+    setLotExpirationDialog,
+
+  ] = useState(null);
+
+
+  const [
+
     savingStatus,
 
     setSavingStatus,
@@ -300,6 +338,15 @@ function ProductCard({
 
 
 
+
+
+  const [
+
+    lotExhaustionTarget,
+
+    setLotExhaustionTarget,
+
+  ] = useState(null);
 
 
   const [
@@ -1126,6 +1173,165 @@ function ProductCard({
 
 
 
+  function handleRequestLotExhaustion(target) {
+    if (!isMultiLot || isOutOfStock || savingQuantity || !target || target.quantity < 1) {
+      return;
+    }
+
+    setLotExhaustionTarget(target);
+  }
+
+  async function handleConfirmLotExhaustion() {
+    if (!home || !lotExhaustionTarget || !isMultiLot || isOutOfStock || savingQuantity) {
+      return;
+    }
+
+    setSavingQuantity(true);
+
+    try {
+      const result = await exhaustMultiLotStock(
+        home.id,
+        product.id,
+        (Array.isArray(lots) ? lots : []).map((lot) => lot.id),
+        lotExhaustionTarget.lotIds,
+        lotExhaustionTarget.referenceLotId
+      );
+
+      setQuantity(result.newQuantity);
+
+      if (result.becameOutOfStock) {
+        setIsOutOfStock(true);
+        setQuantityBeforeOutOfStock(0);
+        setShoppingItemId("");
+        if (onQuantityChange) {
+          await onQuantityChange(product.id, 0, {
+            isOutOfStock: true,
+            quantityBeforeOutOfStock: 0,
+            outOfStockShoppingItemId: "",
+          });
+        }
+      } else if (onQuantityChange) {
+        await onQuantityChange(product.id, result.newQuantity);
+      }
+
+      if (onInventoryRefresh) {
+        await onInventoryRefresh();
+      }
+
+      setLotExhaustionTarget(null);
+
+      if (result.becameOutOfStock) {
+        document.activeElement?.blur();
+        setStatusDialogMode("shopping");
+      }
+    } catch (error) {
+      console.error("Error al agotar el lote:", error);
+    } finally {
+      setSavingQuantity(false);
+    }
+  }
+  function handleOpenAddLotDialog() {
+    if (!isMultiLot || isOutOfStock || savingQuantity) {
+      return;
+    }
+
+    setAddLotDialogOpen(true);
+  }
+
+  async function handleAddCompleteLot(quantityToAdd, expirationDate) {
+    if (!home || !isMultiLot || isOutOfStock || savingQuantity) {
+      return;
+    }
+
+    const numericQuantity = Number(quantityToAdd);
+    if (!Number.isInteger(numericQuantity) || numericQuantity < 1) {
+      return;
+    }
+
+    setSavingQuantity(true);
+
+    try {
+      const result = await addProductStockAsNewLot(
+        home.id,
+        product.id,
+        numericQuantity,
+        {
+          expirationDate,
+          openingDate: "",
+          origin: "manual",
+        }
+      );
+
+      await addMovement(
+        home.id,
+        {
+          productId: product.id,
+          productName: product.name,
+          type: "increase",
+          quantityChange: result.quantityAdded,
+          previousQuantity: result.previousQuantity,
+          newQuantity: result.newQuantity,
+        }
+      );
+
+      setQuantity(result.newQuantity);
+
+      if (onQuantityChange) {
+        await onQuantityChange(product.id, result.newQuantity);
+      }
+
+      if (onInventoryRefresh) {
+        await onInventoryRefresh();
+      }
+
+      setAddLotDialogOpen(false);
+    } catch (error) {
+      console.error("Error al añadir un lote:", error);
+    } finally {
+      setSavingQuantity(false);
+    }
+  }
+  function handleOpenLotExpirationDialog(lotGroup) {
+    if (!isMultiLot || savingLotExpiration || savingQuantity) {
+      return;
+    }
+
+    setLotExpirationDialog(lotGroup);
+  }
+
+  async function handleSaveLotExpirationDate(expirationDate) {
+    if (!home || !lotExpirationDialog || savingLotExpiration || savingQuantity || !isMultiLot) {
+      return;
+    }
+
+    setSavingLotExpiration(true);
+    setSavingQuantity(true);
+
+    try {
+      await updateMultiLotFamilyExpirationDate(
+        home.id,
+        product.id,
+        (Array.isArray(lots) ? lots : []).map((lot) => lot.id),
+        (Array.isArray(lots) ? lots : [])
+          .filter(
+            (lot) => String(lot.splitFromLotId || lot.id) === lotExpirationDialog.id
+          )
+          .map((lot) => lot.id),
+        expirationDate
+      );
+
+      if (onInventoryRefresh) {
+        await onInventoryRefresh();
+      }
+
+      setLotExpirationDialog(null);
+    } catch (error) {
+      console.error("Error al actualizar la caducidad del lote:", error);
+    } finally {
+      setSavingQuantity(false);
+      setSavingLotExpiration(false);
+    }
+  }
   async function handleAddLotAwareUnit() {
     if (!home || savingQuantity || isOutOfStock || !isMultiLot) {
       return;
@@ -3373,6 +3579,17 @@ function ProductCard({
 
           </Box>
 
+          {isMultiLot && (
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={handleOpenAddLotDialog}
+              disabled={savingQuantity || isOutOfStock}
+            >
+              Añadir lote
+            </Button>
+          )}
+
 
 
 
@@ -3799,6 +4016,56 @@ function ProductCard({
 
 
 
+                          <Button
+                            size="small"
+                            onClick={() =>
+                              handleOpenLotExpirationDialog(
+                                lotGroup
+                              )
+                            }
+                            disabled={
+                              savingQuantity
+                              || savingLotExpiration
+                              || savingLotOpeningId !== ""
+                              || savingLotUndoOpeningId !== ""
+                            }
+                          >
+                            Editar lote
+                          </Button>
+
+
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            color="error"
+                            onClick={() => {
+                              const familyLots = (Array.isArray(lots) ? lots : [])
+                                .filter(
+                                  (lot) => String(lot.splitFromLotId || lot.id) === lotGroup.id
+                                );
+                              const familyQuantity = familyLots.reduce(
+                                (total, lot) => total + (Number(lot.quantity) || 0),
+                                0
+                              );
+
+                              handleRequestLotExhaustion({
+                                label: `Lote ${groupIndex + 1}`,
+                                quantity: familyQuantity,
+                                lotIds: familyLots.map((lot) => lot.id),
+                                referenceLotId: lotGroup.id,
+                              });
+                            }}
+                            disabled={
+                              savingQuantity
+                              || isOutOfStock
+                              || savingLotOpeningId !== ""
+                              || savingLotUndoOpeningId !== ""
+                            }
+                          >
+                            Agotar lote
+                          </Button>
+
+
                           <Chip
 
                             size="small"
@@ -4107,6 +4374,31 @@ function ProductCard({
 
                                 />
 
+
+
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  color="error"
+                                  onClick={() =>
+                                    handleRequestLotExhaustion({
+                                      label: lot.openingDate
+                                        ? `Apertura ${openingIndex}`
+                                        : "Stock sin abrir",
+                                      quantity: lotQuantity,
+                                      lotIds: [lot.id],
+                                      referenceLotId: lot.id,
+                                    })
+                                  }
+                                  disabled={
+                                    savingQuantity
+                                    || isOutOfStock
+                                    || savingLotOpeningId !== ""
+                                    || savingLotUndoOpeningId !== ""
+                                  }
+                                >
+                                  Agotar sublote
+                                </Button>
 
 
                               </Box>
@@ -4997,6 +5289,44 @@ function ProductCard({
 
       />
 
+
+
+      <ConfirmDialog
+        open={lotExhaustionTarget !== null}
+        title={lotExhaustionTarget?.lotIds.length > 1 ? "Agotar lote" : "Agotar sublote"}
+        message={
+          lotExhaustionTarget
+            ? `¿Deseas retirar definitivamente ${lotExhaustionTarget.quantity} ${lotExhaustionTarget.quantity === 1 ? "unidad" : "unidades"} de ${lotExhaustionTarget.label}? Esta operación no se puede deshacer.`
+            : ""
+        }
+        confirmText="Agotar"
+        confirmColor="error"
+        loading={savingQuantity}
+        onCancel={() => setLotExhaustionTarget(null)}
+        onConfirm={handleConfirmLotExhaustion}
+      />
+
+
+      <AddLotDialog
+        open={addLotDialogOpen}
+        saving={savingQuantity}
+        onCancel={() => setAddLotDialogOpen(false)}
+        onConfirm={handleAddCompleteLot}
+      />
+
+
+      <LotExpirationDialog
+        open={lotExpirationDialog !== null}
+        lotLabel={
+          lotExpirationDialog
+            ? `Lote ${lotGroups.findIndex((group) => group.id === lotExpirationDialog.id) + 1}`
+            : "lote"
+        }
+        initialExpirationDate={lotExpirationDialog?.expirationDate || ""}
+        saving={savingLotExpiration}
+        onCancel={() => setLotExpirationDialog(null)}
+        onConfirm={handleSaveLotExpirationDate}
+      />
 
 
       <ShoppingDuplicateDialog
